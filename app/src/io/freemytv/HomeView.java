@@ -3,6 +3,7 @@ package io.freemytv;
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.app.Activity;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.LauncherApps;
 import android.content.pm.PackageManager;
@@ -100,8 +101,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static final int L_INK = 0xFF1D1D1F, L_DIM = 0xFF6E6E73, L_FAINT = 0xFF8E8E93;
     private static String[] tabs;
     private static int tabsGeneration = -1;
-    /** Explore, Movies, Shows and, with IGDB keys, Games: then the round buttons are numbered from TABS on. */
-    private static final String[] TAB_KIND = Recs.gamesOn() ? new String[] {null, "movie", "tv", Recs.GAME} : new String[] {null, "movie", "tv"};
+    /** Explore, Movies, Shows and, with IGDB keys, Games and News: then the round buttons are numbered from TABS on. */
+    private static final String[] TAB_KIND = Recs.tabKinds();
     private static final int TABS = TAB_KIND.length;
     private static final int Z_TOP = 4, Z_CARDS = 5;
 
@@ -507,8 +508,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     /** The tab names, made again only when the language changes (they are drawn on every frame). */
     private static String[] tabs() {
         if (tabsGeneration != Ui.generation) {
-            tabs = TABS > 3 ? new String[] {Ui.tr("Explore"), Ui.tr("Movies"), Ui.tr("Shows"), Ui.tr("Games")}
-                    : new String[] {Ui.tr("Explore"), Ui.tr("Movies"), Ui.tr("Shows")};
+            tabs = new String[TABS];
+            for (int i = 0; i < TABS; i++) {
+                String kind = TAB_KIND[i];
+                tabs[i] = kind == null ? Ui.tr("Explore") : kind.equals("movie") ? Ui.tr("Movies") : kind.equals("tv") ? Ui.tr("Shows")
+                        : kind.equals(Recs.GAME) ? Ui.tr("Games") : Ui.tr("News");
+            }
             tabsGeneration = Ui.generation;
         }
         return tabs;
@@ -538,7 +543,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         int width = MeasureSpec.getSize(widthSpec), height = MeasureSpec.getSize(heightSpec);
         float kk = width / 1920f;
         measure(sky, width, height);
-        measure(heroLayer, width, Math.round(790 * kk));
+        measure(heroLayer, width, Math.round(820 * kk));   // room for the narrow cards' second meta line
         measure(status, Math.round(1160 * kk), Math.round(240 * kk));
         // Sized to what they draw (the glass and its shadow; the grown tiles and their shadows): smaller layers are
         // cheaper for the GPU to composite on every frame of the drawer animation.
@@ -2263,6 +2268,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             r = focusedCell;
         } else if (zone == Z_HERO) {
             Recs.Pick p = currentPick();
+            if (openPage(p)) return;
             if (p == null || p.pkg == null) return;
             it = HomeApps.app(p.pkg, Recs.serviceName(p), p.link);
             r = heroButton;
@@ -2283,6 +2289,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             r = topRects[topIndex];
         } else if (zone == Z_CARDS) {
             Recs.Pick p = cardIndex < cards.size() ? cards.get(cardIndex) : null;
+            if (openPage(p)) return;
             if (p == null || p.pkg == null) return;
             it = HomeApps.app(p.pkg, Recs.serviceName(p), p.link);
             r = cardRects[cardIndex];
@@ -2826,6 +2833,21 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (running) updatePicks();
     };
 
+    /** A game opens its page (details, price, trailer) and a news item the article; anything else is opened by its app. */
+    private boolean openPage(Recs.Pick p) {
+        if (p == null || !(Recs.GAME.equals(p.kind) || Recs.NEWS.equals(p.kind))) return false;
+        click.open();
+        Intent i = new Intent(getContext(), Recs.GAME.equals(p.kind) ? GameActivity.class : NewsActivity.class)
+                .putExtra("id", p.id).putExtra("title", p.title).putExtra("meta", p.meta)
+                .putExtra("image", p.backdrop).putExtra("link", p.link);
+        try {
+            getContext().startActivity(i);
+        } catch (RuntimeException e) {
+            AppLog.w("open page: " + e.getMessage());
+        }
+        return true;
+    }
+
     private void selectTab(int index) {
         if (index == tab) return;
         tab = index;
@@ -2997,10 +3019,32 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (p == null) return;
         fitPaint.set(lCardTitle);
         c.drawText(TextUtils.ellipsize(p.title, fitPaint, bw, TextUtils.TruncateAt.END).toString(), base.left, base.bottom + 46 * k, lCardTitle);
-        if (i == 0 && p.meta != null && !p.meta.isEmpty()) {
-            fitPaint.set(lCardMeta);
-            c.drawText(TextUtils.ellipsize(p.meta, fitPaint, bw, TextUtils.TruncateAt.END).toString(), base.left, base.bottom + 80 * k, lCardMeta);
+        if (i == 0) {
+            if (p.meta != null && !p.meta.isEmpty()) {
+                fitPaint.set(lCardMeta);
+                c.drawText(TextUtils.ellipsize(p.meta, fitPaint, bw, TextUtils.TruncateAt.END).toString(), base.left, base.bottom + 80 * k, lCardMeta);
+            }
+            return;
         }
+        // The narrow cards: the first two parts, on one line when they fit ("Série · Drama"), else two (a game's
+        // date / platforms).
+        fitPaint.set(lCardMeta);
+        String[] lines = brief(p, fitPaint, bw);
+        for (int j = 0; j < lines.length; j++) {
+            c.drawText(TextUtils.ellipsize(lines[j], fitPaint, bw, TextUtils.TruncateAt.END).toString(), base.left, base.bottom + (78 + 30 * j) * k, lCardMeta);
+        }
+    }
+
+    /** Made once per pick, not per frame. The trailer note stays on the wide card only. */
+    private static String[] brief(Recs.Pick p, Paint paint, float width) {
+        if (p.brief == null) {
+            String[] parts = p.meta == null ? new String[0] : p.meta.split(" · ");
+            List<String> keep = new ArrayList<>();
+            for (String part : parts) if (keep.size() < 2 && !part.equals(Ui.tr("Trailer on YouTube"))) keep.add(part);
+            String joined = TextUtils.join(" · ", keep);
+            p.brief = keep.size() < 2 || paint.measureText(joined) <= width ? new String[] {joined} : keep.toArray(new String[0]);
+        }
+        return p.brief;
     }
 
     /**

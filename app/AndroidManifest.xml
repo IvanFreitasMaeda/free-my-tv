@@ -74,6 +74,26 @@
         android:allowBackup="false"
         android:usesCleartextTraffic="false">
 
+        <!-- A game from the Games tab: details, price and the trailer. -->
+        <activity
+            android:name=".GameActivity"
+            android:process=":home"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:screenOrientation="landscape"
+            android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|screenLayout|smallestScreenSize|uiMode|density|fontScale|locale|layoutDirection"
+            android:theme="@style/FreeMyTV.Home" />
+
+        <!-- A news item from the News tab, read on its site. -->
+        <activity
+            android:name=".NewsActivity"
+            android:process=":home"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:screenOrientation="landscape"
+            android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|screenLayout|smallestScreenSize|uiMode|density|fontScale|locale|layoutDirection"
+            android:theme="@style/FreeMyTV.Home" />
+
         <!-- The app's icon opens the settings (switch between Free My TV and the original home screen). -->
         <activity
             android:name=".SettingsActivity"

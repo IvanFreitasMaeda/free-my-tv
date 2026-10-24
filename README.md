@@ -2,8 +2,15 @@
 > [simbasjungles](https://github.com/simbasjungles) e colaboradores (licença MIT). Todo o crédito do projeto
 > original é deles.
 >
-> **O que esta versão adiciona:** uma aba **Jogos** na tela inicial (Google TV / Android TV) com os lançamentos de
-> games mais aguardados, vindos do [IGDB](https://www.igdb.com): arte, data, plataformas e trailer no YouTube.
+> **O que esta versão adiciona** (Google TV / Android TV):
+>
+> - Aba **Jogos**: os lançamentos mais aguardados, do [IGDB](https://www.igdb.com). Cada jogo abre uma página com
+>   descrição, gêneros, nota, desenvolvedora, preço na Steam (com a descrição em português, quando o jogo está lá) e
+>   o trailer, que abre no app do YouTube.
+> - Aba **Notícias**: as últimas notícias de games dos feeds em `news_feeds` (por padrão IGN Brasil e Eurogamer.pt),
+>   lidas dentro do próprio app, só com o texto, sem navegador nem anúncios: leve para TVs lentas.
+> - Nos cards estreitos, a linha de detalhes também aparece (em duas linhas quando não cabe em uma).
+>
 > Para ligar, registre um app grátis em [dev.twitch.tv/console](https://dev.twitch.tv/console) e preencha
 > `igdb_client_id` e `igdb_client_secret` no `config.properties`. Sem essas chaves, o app fica igual ao original.
 

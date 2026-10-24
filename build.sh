@@ -54,6 +54,7 @@ final class Config {
     static final String WATCHMODE_KEY = "$(prop watchmode_key '')";
     static final String IGDB_CLIENT_ID = "$(prop igdb_client_id '')";
     static final String IGDB_CLIENT_SECRET = "$(prop igdb_client_secret '')";
+    static final String NEWS_FEEDS = "$(prop news_feeds 'https://br.ign.com/feed.xml,https://www.eurogamer.pt/feed')";
     static final String TMDB_REGION = "$(prop tmdb_region US)";
     static final String LATITUDE = "$LAT";
     static final String LONGITUDE = "$LON";

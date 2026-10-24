@@ -6,9 +6,11 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Xml;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
+import org.xmlpull.v1.XmlPullParser;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -44,15 +46,18 @@ import java.util.concurrent.Executors;
  *
  * Each person uses their own free TMDB key (config.properties "tmdb_key", built into the app). It never goes to the log.
  * With an IGDB app (config.properties "igdb_client_id" and "igdb_client_secret"), a Games tab shows game releases
- * too; their trailers open in YouTube.
+ * too (each opens GameActivity: details, price and the trailer), and a News tab the latest game news from the RSS
+ * feeds in "news_feeds" (each opens NewsActivity).
  */
 final class Recs {
     static final class Pick {
         int id;
-        String kind;            // "movie", "tv" or "game" (IGDB)
+        String kind;            // "movie", "tv", "game" (IGDB) or "news" (RSS)
         String title, backdrop, meta = "", app, pkg;
         String link;            // opens the title in its app (looked up with Watchmode), or null: the app's home
         boolean detailed;
+        long at;                // news: when it came out (newest first)
+        String[] brief;         // the narrow cards' two meta lines (HomeView), made when first drawn
         java.io.File photo;     // one of your own photos (Photos): no title, no caption
     }
 
@@ -139,6 +144,9 @@ final class Recs {
     private volatile long gamesAt, gamesFailedAt;
     private volatile boolean gamesFetching;
     private volatile String gamesLanguage = "";
+    private volatile List<Pick> news = new ArrayList<>();
+    private volatile long newsAt, newsFailedAt;
+    private volatile boolean newsFetching;
 
     private Recs(Context c) {
         context = c;
@@ -155,6 +163,9 @@ final class Recs {
             if (savedGames != null) games = parse(new JSONArray(savedGames));
             gamesAt = cache.getLong("gamesAt", 0);
             gamesLanguage = cache.getString("gamesLanguage", "");
+            String savedNews = cache.getInt("newsVersion", 0) == NEWS_VERSION ? cache.getString("news", null) : null;
+            if (savedNews != null) news = parse(new JSONArray(savedNews));
+            newsAt = cache.getLong("newsAt", 0);
         } catch (Exception ignored) {
         }
     }
@@ -207,7 +218,9 @@ final class Recs {
     /** This hour's 3, movies only ("movie"), shows only ("tv") or games ("game"); null = movies and shows (the tabs). */
     List<Pick> now(String kind) {
         List<Pick> list = new ArrayList<>();
-        if (GAME.equals(kind)) {
+        if (NEWS.equals(kind)) {
+            return new ArrayList<>(news.subList(0, Math.min(3, news.size())));   // the newest 3, not a rotation
+        } else if (GAME.equals(kind)) {
             list.addAll(games);     // shown even without YouTube: only the trailer needs it
         } else {
             if (!hasKey(context)) return list;    // no TMDB key: no recommendations
@@ -266,12 +279,15 @@ final class Recs {
     }
 
     private File imageFile(Pick p) {
-        return new File(new File(context.getCacheDir(), "recs"), p.backdrop.replace("/", ""));
+        // TMDB's paths are short and plain; IGDB's and the news' addresses get a short name of their own.
+        String name = p.backdrop.startsWith("https://") ? "u" + Integer.toHexString(p.backdrop.hashCode()) : p.backdrop.replace("/", "");
+        return new File(new File(context.getCacheDir(), "recs"), name);
     }
 
     /** With a key: fetches the list if stale or the time of day (morning/afternoon/night) changed; then the details. */
     void refreshIfStale() {
         refreshGames();
+        refreshNews();
         if (!hasKey(context) || fetching) return;
         long now = System.currentTimeMillis();
         long stamp = sourceStamp();   // a new key, country, animation choice or installed streaming-app set refetches
@@ -393,7 +409,7 @@ final class Recs {
     List<Pick> wanted() {
         List<Pick> out = new ArrayList<>();
         java.util.Set<String> seen = new java.util.HashSet<>();
-        for (String kind : gamesOn() ? new String[] {null, "movie", "tv", GAME} : new String[] {null, "movie", "tv"}) {
+        for (String kind : tabKinds()) {
             for (Pick p : now(kind)) if (seen.add(key(p))) out.add(p);
         }
         return out;
@@ -779,7 +795,7 @@ final class Recs {
             synchronized (images) {
                 images.put(p.backdrop, backdrop);
                 // Light design: every tab's 3 cards (and one more), so switching tabs never waits.
-                while (images.size() > (forLight ? (gamesOn() ? 13 : 10) : 4)) images.remove(images.keySet().iterator().next());
+                while (images.size() > (forLight ? 3 * tabKinds().length + 1 : 4)) images.remove(images.keySet().iterator().next());
             }
             notifyListeners();
         } catch (IOException | RuntimeException | OutOfMemoryError e) {
@@ -807,9 +823,9 @@ final class Recs {
             if (parts[i].lastModified() < stale) parts[i].delete();
         }
         File[] files = dir.listFiles((d, name) -> !name.endsWith(".part"));
-        if (files == null || files.length <= 24) return;
+        if (files == null || files.length <= 48) return;
         Arrays.sort(files, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
-        for (int i = 0; i < files.length - 24; i++) {
+        for (int i = 0; i < files.length - 48; i++) {
             //noinspection ResultOfMethodCallIgnored
             files[i].delete();
         }
@@ -818,6 +834,15 @@ final class Recs {
     // MARK: - IGDB (the Games tab: releases from a month ago to four months ahead, the most awaited first)
 
     static final String GAME = "game";
+    static final String NEWS = "news";
+
+    /** The home screen's tabs, by kind: Explore (null), Movies, Shows, then Games and News when they're set up. */
+    static String[] tabKinds() {
+        List<String> kinds = new ArrayList<>(Arrays.asList(null, "movie", "tv"));
+        if (gamesOn()) kinds.add(GAME);
+        if (newsOn()) kinds.add(NEWS);
+        return kinds.toArray(new String[0]);
+    }
     private static final String YOUTUBE = "com.google.android.youtube.tv";
     private static final long GAMES_EVERY = 6 * 3600_000L;
     /** IGDB's platform abbreviations → what the card says ("Series X|S" → "Xbox Series"); the rest as IGDB writes them. */
@@ -969,6 +994,180 @@ final class Recs {
         }
     }
 
+    /**
+     * Everything GameActivity shows beyond the card: IGDB's details and, for games on Steam, Steam's description in
+     * the TV's language and its price in REGION's currency. Blocking: call it off the main thread.
+     */
+    JSONObject gameDetails(int id) throws IOException, org.json.JSONException {
+        JSONArray found = new JSONArray(igdb("/games", "fields name,summary,storyline,first_release_date,platforms.name,"
+                + "genres.name,themes.name,game_modes.name,involved_companies.company.name,involved_companies.developer,"
+                + "involved_companies.publisher,aggregated_rating,total_rating,external_games.uid,"
+                + "external_games.external_game_source,videos.video_id; where id = " + id + ";"));
+        if (found.length() == 0) throw new IOException("IGDB has no game " + id);
+        JSONObject game = found.getJSONObject(0);
+        JSONArray external = game.optJSONArray("external_games");
+        for (int i = 0; external != null && i < external.length(); i++) {
+            JSONObject e = external.getJSONObject(i);
+            if (e.optInt("external_game_source") != 1 || e.optString("uid").isEmpty()) continue;   // 1: Steam
+            try {
+                JSONObject steam = steam(e.optString("uid"));
+                if (steam != null) game.put("steam", steam);
+            } catch (Exception ex) {
+                AppLog.w("steam: " + ex.getMessage());   // no price or description from Steam: IGDB's alone
+            }
+            break;
+        }
+        return game;
+    }
+
+    private static JSONObject steam(String app) throws IOException, org.json.JSONException {
+        String lang = Ui.language.startsWith("pt") ? "brazilian" : Ui.language.startsWith("es") ? "spanish" : "english";
+        HttpURLConnection c = (HttpURLConnection) new URL("https://store.steampowered.com/api/appdetails?appids="
+                + URLEncoder.encode(app, "UTF-8") + "&cc=" + REGION + "&l=" + lang).openConnection();
+        c.setConnectTimeout(8000);
+        c.setReadTimeout(10000);
+        try {
+            if (c.getResponseCode() != 200) throw new IOException("Steam returned HTTP " + c.getResponseCode());
+            JSONObject o = new JSONObject(read(c.getInputStream())).optJSONObject(app);
+            return o == null || !o.optBoolean("success") ? null : o.optJSONObject("data");
+        } finally {
+            c.disconnect();
+        }
+    }
+
+    // MARK: - News (RSS: the newest game news with a picture, from the feeds in config.properties "news_feeds")
+
+    private static final long NEWS_EVERY = 3600_000L;
+    /** Bump when what is saved for each news item changes (the saved list is fetched again). */
+    private static final int NEWS_VERSION = 2;
+    /** Categories of a feed's items that aren't game news (IGN Brasil also writes about films, anime and deals). */
+    private static final Set<String> NOT_GAMES = new HashSet<>(Arrays.asList(
+            "entertainment", "cinema & tv", "anime", "descontos", "affiliation", "tech", "slideshow", "filmes", "séries"));
+
+    static boolean newsOn() {
+        return gamesOn() && !Config.NEWS_FEEDS.trim().isEmpty();
+    }
+
+    private void refreshNews() {
+        if (!newsOn() || newsFetching) return;
+        long now = System.currentTimeMillis();
+        long sinceFail = now - newsFailedAt;
+        if (newsFailedAt != 0 && sinceFail >= 0 && sinceFail < 10 * 60_000L) return;
+        if (!news.isEmpty() && now - newsAt < NEWS_EVERY && now >= newsAt) return;
+        newsFetching = true;
+        io.execute(() -> {
+            try {
+                List<Pick> all = new ArrayList<>();
+                String last = "";
+                for (String feed : Config.NEWS_FEEDS.split(",")) {
+                    if (feed.trim().isEmpty()) continue;
+                    try {
+                        all.addAll(fetchFeed(feed.trim()));
+                    } catch (Exception e) {
+                        last = e.getMessage();
+                        AppLog.w("news " + feed.trim() + ": " + e.getMessage());   // one feed down: the others still come
+                    }
+                }
+                if (all.isEmpty()) throw new IOException(last.isEmpty() ? "no news with a picture" : last);
+                java.util.Collections.sort(all, (a, b) -> Long.compare(b.at, a.at));
+                news = new ArrayList<>(all.subList(0, Math.min(12, all.size())));
+                newsAt = System.currentTimeMillis();
+                newsFailedAt = 0;
+                cache.edit().putString("news", toJson(news).toString()).putLong("newsAt", newsAt).putInt("newsVersion", NEWS_VERSION).apply();
+            } catch (Exception e) {
+                newsFailedAt = System.currentTimeMillis();
+                AppLog.w("news: " + e.getMessage());
+            } finally {
+                newsFetching = false;
+                notifyListeners();
+            }
+        });
+    }
+
+    private List<Pick> fetchFeed(String url) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        c.setConnectTimeout(8000);
+        c.setReadTimeout(15000);
+        c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android TV) FreeMyTV");
+        List<Pick> out = new ArrayList<>();
+        try (InputStream in = c.getInputStream()) {
+            if (c.getResponseCode() != 200) throw new IOException("HTTP " + c.getResponseCode());
+            XmlPullParser x = Xml.newPullParser();
+            x.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false);
+            x.setInput(in, null);
+            String source = "", title = null, link = null, image = null, date = null;
+            boolean inItem = false, skip = false;
+            for (int ev = x.getEventType(); ev != XmlPullParser.END_DOCUMENT; ev = x.next()) {
+                String name = x.getName();
+                if (ev == XmlPullParser.START_TAG) {
+                    if ("item".equals(name)) {
+                        inItem = true;
+                        skip = false;
+                        title = link = image = date = null;
+                    } else if ("title".equals(name) && !inItem && source.isEmpty()) {
+                        source = x.nextText().trim();
+                    } else if (inItem && "title".equals(name)) {
+                        title = x.nextText().trim();
+                    } else if (inItem && "link".equals(name)) {
+                        link = x.nextText().trim();
+                    } else if (inItem && "pubDate".equals(name)) {
+                        date = x.nextText().trim();
+                    } else if (inItem && "category".equals(name)) {
+                        skip |= NOT_GAMES.contains(x.nextText().trim().toLowerCase(Locale.ROOT));
+                    } else if (inItem && image == null && ("enclosure".equals(name) || "media:content".equals(name)
+                            || "media:thumbnail".equals(name))) {
+                        String type = x.getAttributeValue(null, "type"), medium = x.getAttributeValue(null, "medium");
+                        if (type == null || type.startsWith("image") || "image".equals(medium)) image = x.getAttributeValue(null, "url");
+                    }
+                } else if (ev == XmlPullParser.END_TAG && "item".equals(name)) {
+                    inItem = false;
+                    if (skip || title == null || link == null || image == null || !image.startsWith("https://")) continue;
+                    Pick p = new Pick();
+                    p.kind = NEWS;
+                    p.id = link.hashCode();
+                    p.title = title;
+                    p.link = link;
+                    p.backdrop = sized(image);
+                    long at = rssDate(date);
+                    p.at = at;
+                    String when = at == 0 ? "" : new SimpleDateFormat(Ui.tr("format|MMM d"), Ui.locale()).format(new Date(at))
+                            + ", " + new SimpleDateFormat(Ui.tr("format|h:mm a"), Ui.locale()).format(new Date(at));
+                    p.meta = when.isEmpty() ? cleanSource(source) : cleanSource(source) + " · " + when;
+                    p.detailed = true;
+                    out.add(p);
+                }
+            }
+        } finally {
+            c.disconnect();
+        }
+        return out;
+    }
+
+    /** "IGN Brasil - Notícias" → "IGN Brasil", "Eurogamer.pt Latest Articles Feed" → "Eurogamer.pt": the site's name. */
+    private static String cleanSource(String source) {
+        int cut = source.indexOf(" - ");
+        if (cut < 0) cut = source.indexOf(" | ");
+        String name = cut > 0 ? source.substring(0, cut) : source;
+        return name.replaceAll("(?i)\\s+(latest\\s+)?(articles|news|feed|rss)(\\s+(feed|rss))?$", "").trim();
+    }
+
+    /** A lighter copy of the picture where the site makes one (IGN's originals can be 4 MB PNGs). */
+    private static String sized(String image) {
+        java.util.regex.Matcher ign = java.util.regex.Pattern.compile("^https://sm\\.ign\\.com/(ign_[a-z]+/.+)\\.(png|jpg|jpeg)$").matcher(image);
+        if (ign.matches()) return "https://sm.ign.com/t/" + ign.group(1) + ".1280." + ign.group(2);
+        if (image.contains("gnwcdn.com/") && image.contains("width=")) return image.replaceAll("width=\\d+", "width=1280");
+        return image;
+    }
+
+    private static long rssDate(String date) {
+        if (date == null) return 0;
+        try {
+            return new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss Z", Locale.US).parse(date).getTime();
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
     // MARK: - List cache
 
     private void save() {
@@ -990,7 +1189,7 @@ final class Recs {
         for (Pick p : list) {
             a.put(new JSONObject().put("id", p.id).put("kind", p.kind).put("title", p.title).put("backdrop", p.backdrop).put("link", p.link == null ? "" : p.link)
                     .put("meta", p.meta).put("app", p.app == null ? "" : p.app).put("pkg", p.pkg == null ? "" : p.pkg)
-                    .put("detailed", p.detailed));
+                    .put("detailed", p.detailed).put("at", p.at));
         }
         return a;
     }
@@ -1010,6 +1209,7 @@ final class Recs {
             p.app = o.optString("app").isEmpty() ? null : o.optString("app");
             p.pkg = o.optString("pkg").isEmpty() ? null : o.optString("pkg");
             p.detailed = o.optBoolean("detailed");
+            p.at = o.optLong("at");
             out.add(p);
         }
         return out;
