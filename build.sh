@@ -52,6 +52,8 @@ final class Config {
 
     static final String TMDB_KEY = "$(prop tmdb_key '')";
     static final String WATCHMODE_KEY = "$(prop watchmode_key '')";
+    static final String IGDB_CLIENT_ID = "$(prop igdb_client_id '')";
+    static final String IGDB_CLIENT_SECRET = "$(prop igdb_client_secret '')";
     static final String TMDB_REGION = "$(prop tmdb_region US)";
     static final String LATITUDE = "$LAT";
     static final String LONGITUDE = "$LON";

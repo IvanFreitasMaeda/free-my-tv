@@ -16,13 +16,16 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -40,11 +43,13 @@ import java.util.concurrent.Executors;
  * "Watch" opens the service's app.
  *
  * Each person uses their own free TMDB key (config.properties "tmdb_key", built into the app). It never goes to the log.
+ * With an IGDB app (config.properties "igdb_client_id" and "igdb_client_secret"), a Games tab shows game releases
+ * too; their trailers open in YouTube.
  */
 final class Recs {
     static final class Pick {
         int id;
-        String kind;            // "movie" or "tv"
+        String kind;            // "movie", "tv" or "game" (IGDB)
         String title, backdrop, meta = "", app, pkg;
         String link;            // opens the title in its app (looked up with Watchmode), or null: the app's home
         boolean detailed;
@@ -100,6 +105,7 @@ final class Recs {
         SERVICE_NAME.put("okko", "Okko");
         SERVICE_NAME.put("crunchyroll", "Crunchyroll");
         SERVICE_NAME.put("oneplay", "Oneplay");
+        SERVICE_NAME.put("youtube", "YouTube");
     }
     /** Country for "what streams where" (config.properties "tmdb_region", e.g. US, GB, BR). */
     static final String REGION = Config.TMDB_REGION.trim().toUpperCase(Locale.ROOT);
@@ -126,9 +132,13 @@ final class Recs {
     private volatile long listAt;
     private volatile boolean fetching;
     private volatile String error = "";
-    private volatile boolean light;     // light design: builds only the cards (all three tabs' cards fit in memory)
+    private volatile boolean light;     // light design: builds only the cards (every tab's cards fit in memory)
     private volatile long failedAt, keyStamp, linkRetryAt;
     private volatile String listLanguage = "";   // language used for the saved titles, genres and texts
+    private volatile List<Pick> games = new ArrayList<>();
+    private volatile long gamesAt, gamesFailedAt;
+    private volatile boolean gamesFetching;
+    private volatile String gamesLanguage = "";
 
     private Recs(Context c) {
         context = c;
@@ -141,6 +151,10 @@ final class Recs {
             listAt = cache.getLong("listAt", 0);
             listLanguage = cache.getString("language", cache.getBoolean("english", false) ? "en" : "pt");
             keyStamp = cache.getLong("keyStamp", 0);
+            String savedGames = cache.getString("games", null);
+            if (savedGames != null) games = parse(new JSONArray(savedGames));
+            gamesAt = cache.getLong("gamesAt", 0);
+            gamesLanguage = cache.getString("gamesLanguage", "");
         } catch (Exception ignored) {
         }
     }
@@ -190,14 +204,18 @@ final class Recs {
         return now(null);
     }
 
-    /** This hour's 3, movies only ("movie") or shows only ("tv"); null = both (the home screen tabs). */
+    /** This hour's 3, movies only ("movie"), shows only ("tv") or games ("game"); null = movies and shows (the tabs). */
     List<Pick> now(String kind) {
         List<Pick> list = new ArrayList<>();
-        if (!hasKey(context)) return list;    // no TMDB key: no recommendations
-        Map<String, Boolean> have = new HashMap<>();   // one look per app, not per title (this runs every 15 s)
-        for (Pick p : picks) {
-            if ((kind == null || kind.equals(p.kind))
-                    && (!p.detailed || (p.pkg != null && have.computeIfAbsent(p.pkg, this::installed)))) list.add(p);   // app missing: skip
+        if (GAME.equals(kind)) {
+            list.addAll(games);     // shown even without YouTube: only the trailer needs it
+        } else {
+            if (!hasKey(context)) return list;    // no TMDB key: no recommendations
+            Map<String, Boolean> have = new HashMap<>();   // one look per app, not per title (this runs every 15 s)
+            for (Pick p : picks) {
+                if ((kind == null || kind.equals(p.kind))
+                        && (!p.detailed || (p.pkg != null && have.computeIfAbsent(p.pkg, this::installed)))) list.add(p);   // app missing: skip
+            }
         }
         if (list.isEmpty()) return list;
         long hour = System.currentTimeMillis() / 3600_000L;
@@ -253,6 +271,7 @@ final class Recs {
 
     /** With a key: fetches the list if stale or the time of day (morning/afternoon/night) changed; then the details. */
     void refreshIfStale() {
+        refreshGames();
         if (!hasKey(context) || fetching) return;
         long now = System.currentTimeMillis();
         long stamp = sourceStamp();   // a new key, country, animation choice or installed streaming-app set refetches
@@ -370,11 +389,11 @@ final class Recs {
         });
     }
 
-    /** This hour's picks for the three tabs (Explore, Movies, Shows), without repeats. */
+    /** This hour's picks for the tabs (Explore, Movies, Shows and, with IGDB, Games), without repeats. */
     List<Pick> wanted() {
         List<Pick> out = new ArrayList<>();
         java.util.Set<String> seen = new java.util.HashSet<>();
-        for (String kind : new String[] {null, "movie", "tv"}) {
+        for (String kind : gamesOn() ? new String[] {null, "movie", "tv", GAME} : new String[] {null, "movie", "tv"}) {
             for (Pick p : now(kind)) if (seen.add(key(p))) out.add(p);
         }
         return out;
@@ -625,7 +644,7 @@ final class Recs {
     }
 
     private boolean needsLink(Pick p) {
-        return linksOn() && p.pkg != null && p.link == null
+        return linksOn() && !GAME.equals(p.kind) && p.pkg != null && p.link == null
                 && cache.getString(linkKey(p), null) == null && System.currentTimeMillis() >= linkRetryAt;
     }
 
@@ -637,7 +656,7 @@ final class Recs {
 
     /** Sets p.link from what was looked up before, or looks it up (2 requests of the free plan's 2,500 a month). */
     private void findLink(Pick p) {
-        if (!linksOn() || p.pkg == null || p.link != null) return;
+        if (!linksOn() || GAME.equals(p.kind) || p.pkg == null || p.link != null) return;
         String saved = cache.getString(linkKey(p), null);
         if (saved != null) {
             p.link = saved.isEmpty() ? null : saved;
@@ -718,7 +737,8 @@ final class Recs {
         //noinspection ResultOfMethodCallIgnored
         f.getParentFile().mkdirs();
         File part = new File(f.getPath() + ".part");
-        HttpURLConnection c = (HttpURLConnection) new URL(IMAGES + p.backdrop).openConnection();
+        // TMDB's are paths under IMAGES; IGDB's are whole addresses.
+        HttpURLConnection c = (HttpURLConnection) new URL(p.backdrop.startsWith("https://") ? p.backdrop : IMAGES + p.backdrop).openConnection();
         c.setConnectTimeout(8000);
         c.setReadTimeout(20000);
         try (InputStream in = c.getInputStream(); FileOutputStream out = new FileOutputStream(part)) {
@@ -758,7 +778,8 @@ final class Recs {
             if (forLight != light) return;   // the design changed midway: this one is stale
             synchronized (images) {
                 images.put(p.backdrop, backdrop);
-                while (images.size() > (forLight ? 10 : 4)) images.remove(images.keySet().iterator().next());
+                // Light design: every tab's 3 cards (and one more), so switching tabs never waits.
+                while (images.size() > (forLight ? (gamesOn() ? 13 : 10) : 4)) images.remove(images.keySet().iterator().next());
             }
             notifyListeners();
         } catch (IOException | RuntimeException | OutOfMemoryError e) {
@@ -794,17 +815,165 @@ final class Recs {
         }
     }
 
+    // MARK: - IGDB (the Games tab: releases from a month ago to four months ahead, the most awaited first)
+
+    static final String GAME = "game";
+    private static final String YOUTUBE = "com.google.android.youtube.tv";
+    private static final long GAMES_EVERY = 6 * 3600_000L;
+    /** IGDB's platform abbreviations → what the card says ("Series X|S" → "Xbox Series"); the rest as IGDB writes them. */
+    private static final Map<String, String> PLATFORMS = new HashMap<>();
+    static {
+        PLATFORMS.put("Series X|S", "Xbox Series");
+        PLATFORMS.put("XONE", "Xbox One");
+        PLATFORMS.put("Win", "PC");
+        PLATFORMS.put("Mac", "PC");
+        PLATFORMS.put("Linux", "PC");
+    }
+
+    static boolean gamesOn() {
+        return !Config.IGDB_CLIENT_ID.trim().isEmpty() && !Config.IGDB_CLIENT_SECRET.trim().isEmpty();
+    }
+
+    /** Fetches the releases when the list is older than 6 hours, empty or in another language. */
+    private void refreshGames() {
+        if (!gamesOn() || gamesFetching) return;
+        long now = System.currentTimeMillis();
+        long sinceFail = now - gamesFailedAt;
+        if (gamesFailedAt != 0 && sinceFail >= 0 && sinceFail < 10 * 60_000L) return;
+        if (!games.isEmpty() && now - gamesAt < GAMES_EVERY && now >= gamesAt && gamesLanguage.equals(Ui.language)) return;
+        gamesFetching = true;
+        io.execute(() -> {
+            try {
+                games = fetchGames();
+                gamesAt = System.currentTimeMillis();
+                gamesLanguage = Ui.language;
+                gamesFailedAt = 0;
+                cache.edit().putString("games", toJson(games).toString()).putLong("gamesAt", gamesAt)
+                        .putString("gamesLanguage", gamesLanguage).apply();
+            } catch (Exception e) {
+                gamesFailedAt = System.currentTimeMillis();
+                AppLog.w("games: " + e.getMessage());
+            } finally {
+                gamesFetching = false;
+                notifyListeners();
+            }
+        });
+    }
+
+    private List<Pick> fetchGames() throws IOException, org.json.JSONException {
+        long now = System.currentTimeMillis() / 1000;
+        String query = "fields name,first_release_date,platforms.abbreviation,artworks.image_id,screenshots.image_id,videos.video_id;"
+                + " where first_release_date > " + (now - 30 * 86400L) + " & first_release_date < " + (now + 120 * 86400L)
+                + " & hypes > 5 & (artworks != null | screenshots != null); sort hypes desc; limit 24;";
+        JSONArray found = new JSONArray(igdb("/games", query));
+        SimpleDateFormat day = new SimpleDateFormat(Ui.tr("format|MMM d"), Ui.locale());
+        List<Pick> out = new ArrayList<>();
+        for (int i = 0; i < found.length(); i++) {
+            JSONObject o = found.getJSONObject(i);
+            String image = imageId(o.optJSONArray("artworks"));    // artworks are made to be wide; screenshots otherwise
+            if (image == null) image = imageId(o.optJSONArray("screenshots"));
+            if (image == null) continue;
+            Pick p = new Pick();
+            p.id = o.getInt("id");
+            p.kind = GAME;
+            p.title = o.optString("name");
+            p.backdrop = "https://images.igdb.com/igdb/image/upload/" + (Backdrop.W <= 1280 ? "t_720p" : "t_1080p") + "/" + image + ".jpg";
+            List<String> parts = new ArrayList<>();
+            long at = o.optLong("first_release_date") * 1000;
+            String date = day.format(new Date(at));
+            parts.add(at > System.currentTimeMillis() ? Ui.trf("Coming {date}", "date", date) : Ui.trf("Released {date}", "date", date));
+            List<String> platforms = new ArrayList<>();
+            JSONArray pl = o.optJSONArray("platforms");
+            for (int j = 0; pl != null && j < pl.length(); j++) {
+                String a = pl.getJSONObject(j).optString("abbreviation");
+                String name = PLATFORMS.containsKey(a) ? PLATFORMS.get(a) : a;
+                if (!name.isEmpty() && !platforms.contains(name) && platforms.size() < 4) platforms.add(name);
+            }
+            if (!platforms.isEmpty()) parts.add(String.join(", ", platforms));
+            JSONArray videos = o.optJSONArray("videos");
+            String video = videos == null || videos.length() == 0 ? "" : videos.getJSONObject(0).optString("video_id");
+            if (!video.isEmpty()) {
+                p.link = "https://www.youtube.com/watch?v=" + video;
+                p.app = "youtube";
+                p.pkg = YOUTUBE;
+                parts.add(Ui.tr("Trailer on YouTube"));
+            }
+            p.meta = String.join(" · ", parts);
+            p.detailed = true;
+            out.add(p);
+        }
+        if (out.isEmpty()) throw new IOException("IGDB returned no releases");
+        return out;
+    }
+
+    private static String imageId(JSONArray a) {
+        for (int i = 0; a != null && i < a.length(); i++) {
+            String id = a.optJSONObject(i) == null ? "" : a.optJSONObject(i).optString("image_id");
+            if (!id.isEmpty()) return id;
+        }
+        return null;
+    }
+
+    private String igdb(String path, String body) throws IOException, org.json.JSONException {
+        for (int attempt = 0; ; attempt++) {
+            String token = igdbToken(attempt > 0);
+            HttpURLConnection c = (HttpURLConnection) new URL("https://api.igdb.com/v4" + path).openConnection();
+            c.setConnectTimeout(8000);
+            c.setReadTimeout(10000);
+            c.setRequestMethod("POST");
+            c.setDoOutput(true);
+            c.setRequestProperty("Client-ID", Config.IGDB_CLIENT_ID.trim());
+            c.setRequestProperty("Authorization", "Bearer " + token);
+            c.setRequestProperty("Accept", "application/json");
+            try {
+                try (OutputStream out = c.getOutputStream()) {
+                    out.write(body.getBytes(StandardCharsets.UTF_8));
+                }
+                int code = c.getResponseCode();
+                if (code == 401 && attempt == 0) continue;   // the saved token ended early: once more with a new one
+                if (code != 200) throw new IOException("IGDB returned HTTP " + code);
+                return read(c.getInputStream());
+            } finally {
+                c.disconnect();
+            }
+        }
+    }
+
+    /** Twitch's app token (about 60 days), saved; a new one a day before it ends, or when IGDB refused it. */
+    private String igdbToken(boolean fresh) throws IOException, org.json.JSONException {
+        String saved = cache.getString("igdbToken", null);
+        if (!fresh && saved != null && System.currentTimeMillis() < cache.getLong("igdbTokenUntil", 0)) return saved;
+        HttpURLConnection c = (HttpURLConnection) new URL("https://id.twitch.tv/oauth2/token").openConnection();
+        c.setConnectTimeout(8000);
+        c.setReadTimeout(10000);
+        c.setRequestMethod("POST");
+        c.setDoOutput(true);
+        c.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+        String form = "client_id=" + URLEncoder.encode(Config.IGDB_CLIENT_ID.trim(), "UTF-8")
+                + "&client_secret=" + URLEncoder.encode(Config.IGDB_CLIENT_SECRET.trim(), "UTF-8")
+                + "&grant_type=client_credentials";
+        try {
+            try (OutputStream out = c.getOutputStream()) {
+                out.write(form.getBytes(StandardCharsets.UTF_8));
+            }
+            int code = c.getResponseCode();
+            if (code == 400 || code == 401 || code == 403) throw new IOException("Twitch rejected the IGDB keys");
+            if (code != 200) throw new IOException("Twitch returned HTTP " + code);
+            JSONObject o = new JSONObject(read(c.getInputStream()));
+            String token = o.getString("access_token");
+            long until = System.currentTimeMillis() + Math.max(0, o.optLong("expires_in") - 86400) * 1000;
+            cache.edit().putString("igdbToken", token).putLong("igdbTokenUntil", until).apply();
+            return token;
+        } finally {
+            c.disconnect();
+        }
+    }
+
     // MARK: - List cache
 
     private void save() {
         try {
-            JSONArray a = new JSONArray();
-            for (Pick p : picks) {
-                a.put(new JSONObject().put("id", p.id).put("kind", p.kind).put("title", p.title).put("backdrop", p.backdrop).put("link", p.link == null ? "" : p.link)
-                        .put("meta", p.meta).put("app", p.app == null ? "" : p.app).put("pkg", p.pkg == null ? "" : p.pkg)
-                        .put("detailed", p.detailed));
-            }
-            SharedPreferences.Editor e = cache.edit().putString("picks", a.toString()).putInt("period", period).putLong("listAt", listAt)
+            SharedPreferences.Editor e = cache.edit().putString("picks", toJson(picks).toString()).putInt("period", period).putLong("listAt", listAt)
                     .putString("language", listLanguage)
                     .putLong("keyStamp", keyStamp).putInt("version", CACHE_VERSION);
             // Watchmode links of titles no longer in the list go (the refused-key mark stays).
@@ -814,6 +983,16 @@ final class Recs {
             e.apply();
         } catch (Exception ignored) {
         }
+    }
+
+    private static JSONArray toJson(List<Pick> list) throws org.json.JSONException {
+        JSONArray a = new JSONArray();
+        for (Pick p : list) {
+            a.put(new JSONObject().put("id", p.id).put("kind", p.kind).put("title", p.title).put("backdrop", p.backdrop).put("link", p.link == null ? "" : p.link)
+                    .put("meta", p.meta).put("app", p.app == null ? "" : p.app).put("pkg", p.pkg == null ? "" : p.pkg)
+                    .put("detailed", p.detailed));
+        }
+        return a;
     }
 
     private static List<Pick> parse(JSONArray a) {
