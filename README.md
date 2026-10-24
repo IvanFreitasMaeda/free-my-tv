@@ -1,3 +1,12 @@
+> **Esta é uma versão modificada do [Free My TV](https://github.com/simbasjungles/free-my-tv)**, de
+> [simbasjungles](https://github.com/simbasjungles) e colaboradores (licença MIT). Todo o crédito do projeto
+> original é deles.
+>
+> **O que esta versão adiciona:** uma aba **Jogos** na tela inicial (Google TV / Android TV) com os lançamentos de
+> games mais aguardados, vindos do [IGDB](https://www.igdb.com): arte, data, plataformas e trailer no YouTube.
+> Para ligar, registre um app grátis em [dev.twitch.tv/console](https://dev.twitch.tv/console) e preencha
+> `igdb_client_id` e `igdb_client_secret` no `config.properties`. Sem essas chaves, o app fica igual ao original.
+
 <div align="center">
 
 <img src="docs/assets/icon-512.png" width="96" alt="">
