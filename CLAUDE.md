@@ -4,12 +4,15 @@ A home screen for Google TV and Android TV that replaces the stock one, plus a s
 Free My TV and the TV's original home screen. A plain Android app in Java, built without Gradle by `build.sh`.
 LG TVs (webOS) and Samsung TVs (Tizen) get the same home screen as a web app: `web/`, packed by `webos/` and `tizen/`
 (see below).
-The website (freemytv.io) is in `docs/`: static HTML, CSS and JS, no build step. A push to `main` that changes it
-publishes it to GitHub Pages (`.github/workflows/pages.yml`). `docs/index.html` (English) and `docs/pt/index.html`
-(Brazilian Portuguese) are the same page in two languages, so change both; visitors from Brazil land on the
-Portuguese one by themselves, and the PT/EN switch in the menu is remembered.
+This repository is a fork of simbasjungles/free-my-tv that adds the Games (IGDB) and News (RSS) tabs on Google TV
+(`GameActivity`, `NewsActivity`, the IGDB and news parts of `Recs`); see the README.
+The original's website (freemytv.io) is in `docs/`: static HTML, CSS and JS, no build step. This fork doesn't publish
+it (its GitHub workflows were removed). `docs/index.html` (English) and `docs/pt/index.html` (Brazilian Portuguese)
+are the same page in two languages, so change both.
 Before you push, run `tools/check.sh`: the Google TV build, `translate.py --check`, the LG and Samsung packages and
-ES5 in `web/` (syntax and the newer calls old TVs lack). Every pull request runs it too (`.github/workflows/check.yml`).
+ES5 in `web/` (syntax and the newer calls old TVs lack). Nothing runs it automatically here (no CI), so run it
+yourself. `translate.py --check` reports the fork's new strings as missing in the languages beyond Portuguese,
+English and Spanish: that's expected (see the text notes below), and the rest of the check still has to pass.
 
 The person you're helping may not be technical. Keep it short and friendly, say what you're about to do on their TV
 before you do it, and let them do the taps on the TV.
@@ -208,7 +211,8 @@ entries; its system pieces are in `PROTECTED`. USB debugging opens ADB on 5555 t
   drawn every frame is cached and made again when `Ui.generation` changes. After changing text, run
   `python3 tools/translate.py`: it rebuilds `en.json` from the code and lists what each language lacks; translate those
   in every catalogue (or `--fill` with `ANTHROPIC_API_KEY`, which sends only the strings), and keep placeholders as they
-  are. Run `python3 tools/translate.py --check` to validate all catalogues without writing files.
+  are. In this fork, new text only needs Portuguese and English (`pt.json`, `en.json`; Spanish too where it's
+  already kept): the owner uses only those, and the other languages fall back to English. Run `python3 tools/translate.py --check` to validate all catalogues without writing files.
   No right-to-left languages yet (the layout isn't mirrored); CJK and Devanagari use the system font.
   Comments in English, short, only where the why isn't obvious.
 - Settings come from `config.properties` through the generated `out/gen/io/freemytv/Config.java` (never edit that).
